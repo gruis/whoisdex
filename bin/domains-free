@@ -1,0 +1,17 @@
+#!/usr/bin/env ruby
+
+require "yaml"
+require "sqlite3"
+require "sequel"
+
+DB         = Sequel.connect(YAML.load_file("config/database.yml"))
+domains    = DB[:domains]
+
+free_domains = domains.where(:checked_on).and do
+  (expires < Date.today) | ({expires: nil})
+end
+
+puts "DOMAIN, EXPIRES"
+free_domains.each do |domain|
+  puts "#{domain[:name]}.#{domain[:suffix]}, #{domain[:expires]}"
+end

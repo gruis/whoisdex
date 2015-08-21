@@ -1,0 +1,35 @@
+#!/usr/bin/env ruby
+
+require "yaml"
+require "sqlite3"
+require "sequel"
+
+words = []
+cnt   = 0
+
+ARGF.each_line do |word|
+  word = word.chomp
+  (words[word.length] ||= []) << [word]
+  cnt += 1
+end
+
+summary = "words: #{cnt}"
+1.upto(words.length) do |i|
+  summary << " #{i}:#{words[i].length}" if words[i]
+end
+
+$stderr.puts summary
+
+DB = Sequel.connect(YAML.load_file("config/database.yml"))
+domains = DB[:domains]
+
+1.upto(words.length) do |i|
+  next unless words[i]
+  cnt = 0
+  words[i].each do |word|
+    next if domains.where(name: word).count > 0
+    cnt += 1
+    domains.insert(:name => word, :suffix => "com", :length => i)
+    $stderr.print "\rprocessing #{i} char length words ... #{cnt}      "
+  end
+end

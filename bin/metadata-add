@@ -1,0 +1,97 @@
+#!/usr/bin/env ruby
+
+require "thread"
+require "yaml"
+require "sqlite3"
+require "sequel"
+require "whois"
+
+THRD_CNT   = 5
+DEF_SLICE  = 99
+
+unless ARGV.length == 1
+  $stderr.puts "usage: #{File.basename($0)} LEN"
+  Process.exit 2
+end
+len = ARGV[0].to_i
+
+DB    = Sequel.connect(YAML.load_file("config/database.yml"))
+
+def check_filter(filter = DB[:domains])
+  # Domains that have no expiration and have not been checked today
+  #   expires: nil AND (checked_on: nil OR checked < Date.today)
+  # Domains that have an expiration before today and have not been checked today
+  # "SELECT * FROM `domains`
+  #   WHERE (
+  #           (`length` = 5)
+  #           AND
+  #             ((`checked_on` < '2015-08-21') OR (`checked_on` IS NULL))
+  #           AND
+  #             ((`expires` < '2015-08-21') OR (`expires` IS NULL))
+  #         )"
+  filter = filter.and do
+    (checked_on < Date.today) | ({checked_on: nil})
+  end
+  filter = filter.and do
+    (expires < Date.today) | ({expires: nil})
+  end
+
+  filter
+end
+
+def domains_slice(len, limit = DEF_SLICE)
+  domains    = check_filter(DB[:domains].where(length: len))
+  domains.empty? ? nil : domains.to_a[0..limit]
+end
+
+def check_domains(q, mutex = Mutex.new)
+  threads  = []
+  prprefix = ""
+  THRD_CNT.times do
+    threads << Thread.new do
+      client = Whois::Client.new(referral: false)
+      while q.length > 0
+        entry  = q.pop
+        domain = "#{entry[:name]}.com"
+        begin
+          record = client.lookup("#{domain}")
+          mutex.synchronize do
+            if record.available?
+              $stderr.puts "#{prprefix}#{domain} available"
+              prprefix = ""
+              entry[:expires] && DB[:domains].where(id: entry[:id]).update(expires: nil)
+            else
+              $stderr.print "\r#{domain} unavailable until #{record.expires_on}"
+              prprefix = "\n"
+              DB[:domains].where(id: entry[:id]).update(expires: record.expires_on)
+            end
+            DB[:domains].where(id: entry[:id]).update(checked_on: Date.today)
+          end
+        rescue => e
+          $stderr.puts "#{prprefix}Error while checking #{domain}"
+          $stderr.puts e
+          $stderr.puts e.backtrace
+        end
+        sleep rand
+      end
+    end
+  end
+
+  threads.each {|t| t.join }
+  $stderr.print "#{prprefix}"
+end
+
+mutex = Mutex.new
+queue = Queue.new
+
+$stderr.puts "Checking #{check_filter(DB[:domains].where(length: len)).count} domains of length #{len}"
+while (dslice = domains_slice(len))
+  dslice.each { |domain| queue.push domain }
+  $stderr.puts "Checking #{queue.length} domains"
+  check_domains(queue, mutex)
+  if check_filter(DB[:domains].where(length: len)).count > 0
+    stime = rand(10)
+    $stderr.puts "Pausing for #{stime} seconds"
+    sleep stime
+  end
+end
